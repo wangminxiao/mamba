@@ -229,7 +229,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
-                  bool delta_softplus) {
+                  bool delta_softplus, const c10::optional<at::Tensor> &x) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -309,15 +309,20 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
     // at::Tensor out = torch::empty_like(u);
     // Right now u has BHL layout and delta has HBL layout, and we want out to have HBL layout
     at::Tensor out = torch::empty_like(delta);
-    at::Tensor x;
-    x = torch::empty({batch_size, dim, n_chunks, dstate * 2}, u.options().dtype(weight_type));
+    if (x.has_value()){
+        auto _x = x.value();
+        TORCH_CHECK(_x.scalar_type() == weight_type);
+        TORCH_CHECK(_x.is_cuda());
+        TORCH_CHECK(_x.stride(-1) == 1);
+        CHECK_SHAPE(_x, batch_size, dim, n_chunks, dstate * 2);
+    }
 
     SSMParamsBase params;
     set_ssm_params_fwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
                        u, delta, A, B, C, out, z, out_z,
                        D_.has_value() ? D_.value().data_ptr() : nullptr,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
-                       x.data_ptr(),
+                       x.value().data_ptr(),
                        has_z,
                        delta_softplus);
 
@@ -330,7 +335,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
             selective_scan_fwd_cuda<input_t, weight_t>(params, stream);
         });
     });
-    std::vector<at::Tensor> result = {out, x};
+    std::vector<at::Tensor> result = {out, x.value()};
     if (has_z) { result.push_back(out_z); }
     return result;
 }
@@ -464,6 +469,8 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     if (D_.has_value()) { dD = torch::zeros_like(D_.value()); }
     at::Tensor ddelta_bias;
     if (delta_bias_.has_value()) { ddelta_bias = torch::zeros_like(delta_bias_.value()); }
+    // wmx define d_prev_state 
+    at::Tensor d_prev_state = torch::zeros({batch_size, dim, dstate}, u.options().dtype(torch::kFloat32));
 
     SSMParamsBwd params;
     set_ssm_params_bwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
@@ -475,6 +482,8 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                        D_.has_value() ? dD.data_ptr() : nullptr,
                        delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
                        has_z, delta_softplus, recompute_out_z);
+    // wmx bypass bwd and get the grad
+    params.d_init_state_ptr = d_prev_state.data_ptr();
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -488,6 +497,8 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     std::vector<at::Tensor> result = {du, ddelta, dA, dB.to(B.dtype()), dC.to(C.dtype()), dD, ddelta_bias};
     if (has_z) { result.push_back(dz); }
     if (recompute_out_z) { result.push_back(out_z); }
+    // wmx return grad of initial/prev state 
+    result.push_back(d_prev_state.to(u.dtype()));
     return result;
 }
 

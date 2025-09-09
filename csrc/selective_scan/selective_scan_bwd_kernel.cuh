@@ -28,6 +28,18 @@ template<typename scalar_t> __device__ __forceinline__ scalar_t conj(scalar_t x)
 template<> __device__ __forceinline__ float conj<float>(float x) { return x; }
 template<> __device__ __forceinline__ complex_t conj<complex_t>(complex_t x) { return std::conj(x); }
 
+// wmx
+template <typename T>
+__device__ inline float get_real(const T& val) {
+    return static_cast<float>(val);
+}
+
+template <>
+__device__ inline float get_real<c10::complex<float>>(const c10::complex<float>& val) {
+    return val.real();
+}
+// wmx end
+
 template<int kNThreads_, int kNItems_, bool kIsEvenLen_, bool kIsVariableB_, bool kIsVariableC_,
          bool kDeltaSoftplus_, bool kHasZ_, typename input_t_, typename weight_t_>
 struct Selective_Scan_bwd_kernel_traits {
@@ -333,6 +345,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 if (threadIdx.x == 0) {
                     smem_da[state_idx] = chunk == params.n_chunks - 1 ? dA_val : dA_val + smem_da[state_idx];
                 }
+
             } else {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
@@ -442,6 +455,20 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             }
         }
 
+        // wmx
+        if (chunk == 0 && params.d_init_state_ptr != nullptr && threadIdx.x == 0) {
+            input_t* d_init_state = reinterpret_cast<input_t*>(params.d_init_state_ptr)
+                                    + batch_id * params.dim * params.dstate
+                                    + dim_id * params.dstate;
+
+            for (int state_idx = 0; state_idx < params.dstate; ++state_idx) {
+                float delta_a = get_real(smem_delta_a[state_idx]);
+                float grad = smem_running_postfix[state_idx].y * delta_a;
+                d_init_state[state_idx] = input_t(grad);
+            }
+        }
+        // wmx end
+
         if constexpr (kDeltaSoftplus) {
             __syncthreads();
             input_t delta_vals_load[kNItems];
@@ -470,6 +497,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         Bvar -= kChunkSize * (!kIsComplex ? 1 : 2);
         Cvar -= kChunkSize * (!kIsComplex ? 1 : 2);
     }
+    
     if (params.dD_ptr != nullptr) {
         dD_val = typename Ktraits::BlockReduceFloatT(smem_reduce_float).Sum(dD_val);
         if (threadIdx.x == 0) { gpuAtomicAdd(dD, dD_val); }

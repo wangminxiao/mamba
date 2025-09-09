@@ -98,4 +98,7 @@ struct SSMParamsBwd: public SSMParamsBase {
     void *__restrict__ dz_ptr;
     void *__restrict__ ddelta_ptr;
     void *__restrict__ ddelta_bias_ptr;
+    // wmx define d_init_state_ptr
+    void *__restrict__ d_init_state_ptr;
+
 };
